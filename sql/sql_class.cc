@@ -933,11 +933,11 @@ void Open_tables_state::reset_open_tables_state()
   reset_reprepare_observers();
 }
 
-
-THD::THD(bool enable_plugins)
-   :Statement(&main_lex, &main_mem_root, STMT_CONVENTIONAL_EXECUTION,
+THD::THD(bool enable_plugins, bool lean_init)
+   :Statement(nullptr, &main_mem_root, STMT_CONVENTIONAL_EXECUTION,
               /* statement id */ 0),
    rli_fake(0), rli_slave(NULL),
+   stmt_map(nullptr),
    is_admin_conn(false),
    in_sub_stmt(0),
    fill_status_recursion_level(0),
@@ -958,11 +958,13 @@ THD::THD(bool enable_plugins)
    stmt_depends_on_first_successful_insert_id_in_prev_stmt(FALSE),
    m_examined_row_count(0),
    m_accessed_rows_and_keys(0),
+   m_user_connect(NULL),
    m_digest(NULL),
    m_statement_psi(NULL),
    m_idle_psi(NULL),
    m_server_idle(false),
    next_to_commit(NULL),
+   slave_thread(0),
    is_fatal_error(0),
    transaction_rollback_request(0),
    is_fatal_sub_stmt_error(false),
@@ -977,14 +979,73 @@ THD::THD(bool enable_plugins)
    debug_sync_control(0),
 #endif /* defined(ENABLED_DEBUG_SYNC) */
    m_enable_plugins(enable_plugins),
-   owned_gtid_set(global_sid_map),
+   //owned_gtid_set(global_sid_map),
+   owned_gtid_set(nullptr),
    connection_certificate_buf(NULL),
+   // ANIRBAN
+   main_lex(0),
    main_da(0, false),
    m_stmt_da(&main_da),
    conn_timeout_err_msg(NULL),
-   duplicate_slave_uuid(false)
+   duplicate_slave_uuid(false),
+   m_lean_init(lean_init),
+   conn_thrd_id(-1)
 {
-  ulong tmp;
+  if (lean_init) {
+    thd_initialize_lean();
+  } else {
+
+    // ANIRBAN
+    main_lex = new LEX;
+    init_lex(main_lex);
+
+    thd_initialize_lean();
+    thd_initialize();
+  }
+}
+
+void THD::thd_initialize_lean()
+{
+
+  init_sql_alloc(&main_mem_root, ALLOC_ROOT_MIN_BLOCK_SIZE, 0);
+  stmt_arena= this;
+  thread_stack= 0;
+
+  main_security_ctx.init();
+  security_ctx= &main_security_ctx;
+
+#ifndef EMBEDDED_LIBRARY
+  net.vio=0;
+#endif
+
+  memset(&variables, 0, sizeof(variables));
+  m_thread_id= 0;
+
+  ulong tmp= sql_rnd_with_mutex();
+  randominit(&rand, tmp + (ulong) &rand, tmp + (ulong) ::global_query_id);
+  thr_lock_info_init(&lock_info); /* safety: will be reset after start */
+
+#ifdef SIGNAL_WITH_VIO_SHUTDOWN
+  active_vio = 0;
+#endif
+  mysql_mutex_init(key_LOCK_thd_data, &LOCK_thd_data, MY_MUTEX_INIT_FAST);
+  mysql_mutex_init(key_LOCK_thd_db_read_only_hash, &LOCK_thd_db_read_only_hash,
+                   MY_MUTEX_INIT_FAST);
+}
+
+void THD::thd_initialize()
+{
+  owned_gtid_set = new Gtid_set(global_sid_map);
+
+  if (!main_lex) {
+     // ANIRBAN
+     main_lex = new LEX;
+     init_lex(main_lex);
+  }
+
+  stmt_map = new Statement_map;
+
+  //ulong tmp;
 
   mdl_context.init(this);
   /*
@@ -992,12 +1053,14 @@ THD::THD(bool enable_plugins)
     the destructor works OK in case of an error. The main_mem_root
     will be re-initialized in init_for_queries().
   */
-  init_sql_alloc(&main_mem_root, ALLOC_ROOT_MIN_BLOCK_SIZE, 0);
-  stmt_arena= this;
-  thread_stack= 0;
+  // ANIRBAN
+  //init_sql_alloc(&main_mem_root, ALLOC_ROOT_MIN_BLOCK_SIZE, 0);
+  //stmt_arena= this;
+  //thread_stack= 0;
   catalog= (char*)"std"; // the only catalog we have for now
-  main_security_ctx.init();
-  security_ctx= &main_security_ctx;
+  // ANIRBAN
+  //main_security_ctx.init();
+  //security_ctx= &main_security_ctx;
   no_errors= 0;
   password= 0;
   query_start_used= query_start_usec_used= 0;
@@ -1018,12 +1081,14 @@ THD::THD(bool enable_plugins)
   user_time.tv_usec= 0;
   start_time.tv_sec= 0;
   start_time.tv_usec= 0;
-  start_utime= prior_thr_create_utime= 0L;
+  // ANIRBAN2
+  //start_utime= prior_thr_create_utime= 0L;
   utime_after_lock= 0L;
   current_linfo =  0;
   slave_thread = 0;
-  memset(&variables, 0, sizeof(variables));
-  m_thread_id= 0;
+  // ANIRBAN
+  //memset(&variables, 0, sizeof(variables));
+  //m_thread_id= 0;
   system_thread_id= 0;
   one_shot_set= 0;
   file_id = 0;
@@ -1032,7 +1097,9 @@ THD::THD(bool enable_plugins)
   db_charset= global_system_variables.collation_database;
   my_hash_clear(&db_read_only_hash);
   memset(ha_data, 0, sizeof(ha_data));
-  mysys_var=0;
+
+  // ANIRBAN2 
+  //mysys_var=0;
   binlog_evt_union.do_union= FALSE;
   enable_slow_log= 0;
   commit_error= CE_NONE;
@@ -1042,7 +1109,8 @@ THD::THD(bool enable_plugins)
 #endif
 #ifndef EMBEDDED_LIBRARY
   mysql_audit_init_thd(this);
-  net.vio=0;
+  // ANIRBAN
+  //net.vio=0;
 #endif
   client_capabilities= 0;                       // minimalistic client
   ull=0;
@@ -1053,12 +1121,14 @@ THD::THD(bool enable_plugins)
   peer_port= 0;					// For SHOW PROCESSLIST
   transaction.m_pending_rows_event= 0;
   transaction.flags.enabled= true;
+
+  // ANIRBAN
 #ifdef SIGNAL_WITH_VIO_SHUTDOWN
-  active_vio = 0;
+  //active_vio = 0;
 #endif
-  mysql_mutex_init(key_LOCK_thd_data, &LOCK_thd_data, MY_MUTEX_INIT_FAST);
-  mysql_mutex_init(key_LOCK_thd_db_read_only_hash, &LOCK_thd_db_read_only_hash,
-                   MY_MUTEX_INIT_FAST);
+  //mysql_mutex_init(key_LOCK_thd_data, &LOCK_thd_data, MY_MUTEX_INIT_FAST);
+  //mysql_mutex_init(key_LOCK_thd_db_read_only_hash, &LOCK_thd_db_read_only_hash,
+                   //MY_MUTEX_INIT_FAST);
 
   /* Variables with default values */
   proc_info="login";
@@ -1099,10 +1169,11 @@ THD::THD(bool enable_plugins)
 
   tablespace_op=FALSE;
   should_write_gtid = TRUE;
-  tmp= sql_rnd_with_mutex();
-  randominit(&rand, tmp + (ulong) &rand, tmp + (ulong) ::global_query_id);
+  //tmp= sql_rnd_with_mutex();
+  //randominit(&rand, tmp + (ulong) &rand, tmp + (ulong) ::global_query_id);
   substitute_null_with_insert_id = FALSE;
-  thr_lock_info_init(&lock_info); /* safety: will be reset after start */
+  // ANIRBAN
+  //thr_lock_info_init(&lock_info); /* safety: will be reset after start */
 
   m_internal_handler= NULL;
   m_binlog_invoker= FALSE;
@@ -1127,6 +1198,7 @@ THD::THD(bool enable_plugins)
   }
 
   prepared_engine= NULL;
+  m_lean_init = false;
 }
 
 void THD::print_proc_info(const char *, ...)
@@ -1545,7 +1617,7 @@ void THD::change_user(void)
   killed= NOT_KILLED;
   cleanup_done= 0;
   init();
-  stmt_map.reset();
+  stmt_map->reset();
   my_hash_init(&user_vars, system_charset_info, USER_VARS_HASH_SIZE, 0, 0,
                (my_hash_get_key) get_var_key,
                (my_hash_free_key) free_user_var, 0);
@@ -1701,7 +1773,7 @@ void THD::release_resources()
 #endif
   mysql_mutex_unlock(&LOCK_thd_data);
 
-  stmt_map.reset();                     /* close all prepared statements */
+  stmt_map->reset();                     /* close all prepared statements */
   if (!cleanup_done)
     cleanup();
 
@@ -1724,7 +1796,7 @@ void THD::release_resources()
 
 THD::~THD()
 {
-  mysql_mutex_assert_not_owner(&LOCK_thread_count);
+  //mysql_mutex_assert_not_owner(&LOCK_thread_count);
   THD_CHECK_SENTRY(this);
   DBUG_ENTER("~THD()");
   DBUG_PRINT("info", ("THD dtor, this %p", this));
@@ -1782,6 +1854,22 @@ THD::~THD()
     delete prepared_engine;
 
   free_root(&main_mem_root, MYF(0));
+
+  // ANIRBAN
+  if (main_lex != NULL) {
+    delete main_lex;
+    main_lex = 0;
+  }
+
+  if (owned_gtid_set) {
+    delete owned_gtid_set;
+    owned_gtid_set = nullptr;
+  }
+
+  if (stmt_map) {
+    delete stmt_map;
+    stmt_map = nullptr;
+  }
 
   if (m_token_array != NULL)
   {

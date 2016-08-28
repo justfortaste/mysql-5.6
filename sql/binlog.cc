@@ -1055,7 +1055,7 @@ static int write_empty_groups_to_cache(THD *thd, binlog_cache_data *cache_data)
   if (thd->owned_gtid.sidno == -1)
   {
 #ifdef HAVE_GTID_NEXT_LIST
-    Gtid_set::Gtid_iterator git(&thd->owned_gtid_set);
+    Gtid_set::Gtid_iterator git(thd->owned_gtid_set);
     Gtid gtid= git.get();
     while (gtid.sidno != 0)
     {

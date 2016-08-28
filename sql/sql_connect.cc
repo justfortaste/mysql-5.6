@@ -924,6 +924,12 @@ pthread_handler_t handle_one_connection(void *arg)
 {
   THD *thd= (THD*) arg;
 
+  //if (thd->lean_init()) 
+    //thd->thd_initialize();
+
+  // ANIRBAN
+  //thd->init_lex(thd->main_lex);
+
   mysql_thread_set_psi_id(thd->thread_id());
 
   do_handle_one_connection(thd);
@@ -1080,6 +1086,9 @@ void do_handle_one_connection(THD *thd_arg)
   for (;;)
   {
 	bool rc;
+
+    if (thd->lean_init())
+      thd->thd_initialize();
 
     NET *net= &thd->net;
     mysql_socket_set_thread_owner(net->vio->mysql_socket);

@@ -79,7 +79,7 @@ enum_return_status Gtid_state::mark_gtid_executed(THD *thd, const Gtid &gtid)
   RETURN_OK;
 
 err:
-  thd->owned_gtid_set.clear();
+  thd->owned_gtid_set->clear();
   thd->owned_gtid.sidno= 0;
   RETURN_REPORTED_ERROR;
 }
@@ -99,7 +99,7 @@ enum_return_status Gtid_state::acquire_ownership(THD *thd, const Gtid &gtid)
   if (thd->get_gtid_next_list() != NULL)
   {
 #ifdef HAVE_GTID_NEXT_LIST
-    if (thd->owned_gtid_set._add_gtid(gtid) != RETURN_STATUS_OK)
+    if (thd->owned_gtid_set->_add_gtid(gtid) != RETURN_STATUS_OK)
       goto err1;
     thd->owned_gtid.sidno= -1;
 #else
@@ -117,7 +117,7 @@ err2:
   if (thd->get_gtid_next_list() != NULL)
   {
 #ifdef HAVE_GTID_NEXT_LIST
-    Gtid_set::Gtid_iterator git(&thd->owned_gtid_set);
+    Gtid_set::Gtid_iterator git(thd->owned_gtid_set);
     Gtid g= git.get();
     while (g.sidno != 0)
     {
@@ -128,7 +128,7 @@ err2:
     DBUG_ASSERT(0);
 #endif
   }
-  thd->owned_gtid_set.clear();
+  thd->owned_gtid_set->clear();
   thd->owned_gtid.sidno= 0;
   RETURN_REPORTED_ERROR;
 }
@@ -137,7 +137,7 @@ err2:
 void Gtid_state::lock_owned_sidnos(const THD *thd)
 {
   if (thd->owned_gtid.sidno == -1)
-    lock_sidnos(&thd->owned_gtid_set);
+    lock_sidnos(thd->owned_gtid_set);
   else if (thd->owned_gtid.sidno > 0)
     lock_sidno(thd->owned_gtid.sidno);
 }
@@ -149,7 +149,7 @@ void Gtid_state::unlock_owned_sidnos(const THD *thd)
   if (thd->owned_gtid.sidno == -1)
   {
 #ifdef HAVE_GTID_NEXT_LIST
-    unlock_sidnos(&thd->owned_gtid_set);
+    unlock_sidnos(thd->owned_gtid_set);
 #else
     DBUG_ASSERT(0);
 #endif
@@ -166,7 +166,7 @@ void Gtid_state::broadcast_owned_sidnos(const THD *thd)
   if (thd->owned_gtid.sidno == -1)
   {
 #ifdef HAVE_GTID_NEXT_LIST
-    broadcast_sidnos(&thd->owned_gtid_set);
+    broadcast_sidnos(thd->owned_gtid_set);
 #else
     DBUG_ASSERT(0);
 #endif
@@ -190,7 +190,7 @@ enum_return_status Gtid_state::update_on_flush(THD *thd)
   {
 #ifdef HAVE_GTID_NEXT_LIST
     rpl_sidno prev_sidno= 0;
-    Gtid_set::Gtid_iterator git(&thd->owned_gtid_set);
+    Gtid_set::Gtid_iterator git(thd->owned_gtid_set);
     Gtid g= git.get();
     while (g.sidno != 0)
     {
@@ -254,7 +254,7 @@ void Gtid_state::update_owned_gtids_impl(THD *thd, bool is_commit)
   {
 #ifdef HAVE_GTID_NEXT_LIST
     rpl_sidno prev_sidno= 0;
-    Gtid_set::Gtid_iterator git(&thd->owned_gtid_set);
+    Gtid_set::Gtid_iterator git(thd->owned_gtid_set);
     Gtid g= git.get();
     while (g.sidno != 0)
     {

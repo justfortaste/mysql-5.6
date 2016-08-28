@@ -176,7 +176,7 @@ int gtid_acquire_ownership_multiple(THD *thd)
   }
 
   // global_sid_lock is now held
-  thd->owned_gtid_set.ensure_sidno(greatest_sidno);
+  thd->owned_gtid_set->ensure_sidno(greatest_sidno);
 
   /*
     Now the following hold:
@@ -193,7 +193,7 @@ int gtid_acquire_ownership_multiple(THD *thd)
     if (!gtid_state->is_logged(g))
     {
       if (gtid_state->acquire_ownership(thd, g) != RETURN_STATUS_OK ||
-          thd->owned_gtid_set._add_gtid(g))
+          thd->owned_gtid_set->_add_gtid(g))
       {
         /// @todo release ownership on error
         ret= 1;
@@ -251,7 +251,7 @@ static inline bool is_already_logged_transaction(const THD *thd)
     if (gtid_next->type == GTID_GROUP)
     {
       DBUG_ASSERT(gtid_next_list->contains_gtid(gtid_next->gtid));
-      if (!thd->owned_gtid_set.contains_gtid(gtid_next->gtid))
+      if (!thd->owned_gtid_set->contains_gtid(gtid_next->gtid))
         DBUG_RETURN(true);
     }
 #else

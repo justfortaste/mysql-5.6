@@ -1437,7 +1437,7 @@ int ha_commit_trans(THD *thd, bool all, bool async,
 
     /* Close all cursors that can not survive COMMIT */
     if (is_real_trans)                          /* not a statement commit */
-      thd->stmt_map.close_transient_cursors();
+      thd->stmt_map->close_transient_cursors();
 
     rw_ha_count= ha_check_and_coalesce_trx_read_only(thd, ha_info, all);
     trans->rw_ha_count= rw_ha_count;
@@ -1645,7 +1645,7 @@ int ha_rollback_low(THD *thd, bool all)
   {
     /* Close all cursors that can not survive ROLLBACK */
     if (all)                          /* not a statement commit */
-      thd->stmt_map.close_transient_cursors();
+      thd->stmt_map->close_transient_cursors();
 
     for (; ha_info; ha_info= ha_info_next)
     {

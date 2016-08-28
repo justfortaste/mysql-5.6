@@ -1094,6 +1094,8 @@ public:
   /* This constructor is called for backup statements */
   Statement() {}
 
+  void init_lex(LEX *lex_arg) { lex = lex_arg; }
+
   Statement(LEX *lex_arg, MEM_ROOT *mem_root_arg,
             enum_state state_arg, ulong id_arg);
   virtual ~Statement();
@@ -2341,6 +2343,15 @@ public:
   /* Slave applier execution context */
   Relay_log_info* rli_slave;
 
+  /**
+   * most of the heavy lifting of initialization of heavy weight data
+   * structures, is delegated to this function, to make the IO loop,
+   * more efficient.
+   */
+  void thd_initialize_lean();
+
+  void thd_initialize();
+
   void reset_for_next_command();
   /*
     Constant for THD::where initialization in the beginning of every query.
@@ -2419,7 +2430,7 @@ public:
   mysql_mutex_t LOCK_thd_db_read_only_hash;
 
   /* all prepared statements and cursors of this connection */
-  Statement_map stmt_map;
+  Statement_map *stmt_map;
   /*
     A pointer to the stack frame of handle_one_connection(),
     which is called first in the thread for handling a client
@@ -3582,7 +3593,7 @@ public:
   */
   bool m_gap_lock_log_written;
 
-  THD(bool enable_plugins= true);
+  THD(bool enable_plugins= true, bool lean_init = false);
 
   /*
     The THD dtor is effectively split in two:
@@ -4189,7 +4200,7 @@ public:
     then this member variable contains the subset of those GTIDs that
     are owned by this thread.
   */
-  Gtid_set owned_gtid_set;
+  Gtid_set *owned_gtid_set;
   my_bool should_write_gtid;
 
   /* Store lsn for engine when preparing finished. */
@@ -4200,7 +4211,7 @@ public:
     if (owned_gtid.sidno == -1)
     {
 #ifdef HAVE_GTID_NEXT_LIST
-      owned_gtid_set.clear();
+      owned_gtid_set->clear();
 #else
       DBUG_ASSERT(0);
 #endif
@@ -4564,7 +4575,9 @@ private:
     instance for each new query, for conventional statements we reuse
     the same lex. (@see mysql_parse for details).
   */
-  LEX main_lex;
+public:
+  LEX *main_lex;
+private:
   /**
     This memory root is used for two purposes:
     - for conventional queries, to allocate structures stored in main_lex
@@ -4611,6 +4624,16 @@ public:
 
   // propagate value from rli
   bool skip_unique_check();
+
+  bool m_lean_init;
+
+  int32_t conn_thrd_id;
+
+  bool lean_init()  const { return m_lean_init; }
+
+  int32_t get_conn_thrd_id() const { return conn_thrd_id; }
+
+  void set_conn_thrd_id(int32_t i) { conn_thrd_id = i; }
 };
 
 /**

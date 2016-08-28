@@ -342,7 +342,7 @@ find_prepared_statement(THD *thd, ulong id)
     prepared statements find() will return 0 if there is a named prepared
     statement with such id.
   */
-  Statement *stmt= thd->stmt_map.find(id);
+  Statement *stmt= thd->stmt_map->find(id);
 
   if (stmt == 0 || stmt->type() != Query_arena::PREPARED_STATEMENT)
     return NULL;
@@ -2289,7 +2289,7 @@ void mysqld_stmt_prepare(THD *thd, const char *packet, uint packet_length)
   if (! (stmt= new Prepared_statement(thd)))
     DBUG_VOID_RETURN; /* out of memory: error is set in Sql_alloc */
 
-  if (thd->stmt_map.insert(thd, stmt))
+  if (thd->stmt_map->insert(thd, stmt))
   {
     /*
       The error is set in the insert. The statement itself
@@ -2303,7 +2303,7 @@ void mysqld_stmt_prepare(THD *thd, const char *packet, uint packet_length)
   if (stmt->prepare(packet, packet_length))
   {
     /* Statement map deletes statement on erase */
-    thd->stmt_map.erase(stmt);
+    thd->stmt_map->erase(stmt);
   }
 
   thd->protocol= save_protocol;
@@ -2431,7 +2431,7 @@ void mysql_sql_stmt_prepare(THD *thd)
   uint query_len= 0;
   DBUG_ENTER("mysql_sql_stmt_prepare");
 
-  if ((stmt= (Prepared_statement*) thd->stmt_map.find_by_name(name)))
+  if ((stmt= (Prepared_statement*) thd->stmt_map->find_by_name(name)))
   {
     /*
       If there is a statement with the same name, remove it. It is ok to
@@ -2461,7 +2461,7 @@ void mysql_sql_stmt_prepare(THD *thd)
     DBUG_VOID_RETURN;
   }
 
-  if (thd->stmt_map.insert(thd, stmt))
+  if (thd->stmt_map->insert(thd, stmt))
   {
     /* The statement is deleted and an error is set if insert fails */
     DBUG_VOID_RETURN;
@@ -2470,7 +2470,7 @@ void mysql_sql_stmt_prepare(THD *thd)
   if (stmt->prepare(query, query_len))
   {
     /* Statement map deletes the statement on erase */
-    thd->stmt_map.erase(stmt);
+    thd->stmt_map->erase(stmt);
   }
   else
     my_ok(thd, 0L, 0L, "Statement prepared");
@@ -2737,7 +2737,7 @@ void mysql_sql_stmt_execute(THD *thd)
   DBUG_ENTER("mysql_sql_stmt_execute");
   DBUG_PRINT("info", ("EXECUTE: %.*s\n", (int) name->length, name->str));
 
-  if (!(stmt= (Prepared_statement*) thd->stmt_map.find_by_name(name)))
+  if (!(stmt= (Prepared_statement*) thd->stmt_map->find_by_name(name)))
   {
     my_error(ER_UNKNOWN_STMT_HANDLER, MYF(0),
              static_cast<int>(name->length), name->str, "EXECUTE");
@@ -2939,7 +2939,7 @@ void mysql_sql_stmt_close(THD *thd)
   DBUG_PRINT("info", ("DEALLOCATE PREPARE: %.*s\n", (int) name->length,
                       name->str));
 
-  if (! (stmt= (Prepared_statement*) thd->stmt_map.find_by_name(name)))
+  if (! (stmt= (Prepared_statement*) thd->stmt_map->find_by_name(name)))
     my_error(ER_UNKNOWN_STMT_HANDLER, MYF(0),
              static_cast<int>(name->length), name->str, "DEALLOCATE PREPARE");
   else if (stmt->is_in_use())
@@ -4110,7 +4110,7 @@ void Prepared_statement::deallocate()
   /* We account deallocate in the same manner as mysqld_stmt_close */
   status_var_increment(thd->status_var.com_stmt_close);
   /* Statement map calls delete stmt on erase */
-  thd->stmt_map.erase(this);
+  thd->stmt_map->erase(this);
 }
 
 

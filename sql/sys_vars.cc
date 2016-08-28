@@ -2074,7 +2074,7 @@ static bool fix_max_connections(sys_var *self, THD *thd, enum_var_type type)
 static Sys_var_ulong Sys_max_connections(
        "max_connections", "The number of simultaneous clients allowed",
        GLOBAL_VAR(max_connections), CMD_LINE(REQUIRED_ARG),
-       VALID_RANGE(1, 100000),
+       VALID_RANGE(1, 1000000),
        DEFAULT(MAX_CONNECTIONS_DEFAULT),
        BLOCK_SIZE(1),
        NO_MUTEX_GUARD,
