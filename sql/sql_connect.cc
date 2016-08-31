@@ -38,6 +38,10 @@
 #include "sql_show.h" // schema_table_store_record
 #include <algorithm>
 
+#if !defined(EMBEDDED_LIBRARY)
+static bool connrate_debug = false;
+#endif
+
 using std::min;
 using std::max;
 
@@ -1085,7 +1089,7 @@ void do_handle_one_connection(THD *thd_arg)
 
   for (;;)
   {
-	bool rc;
+    bool rc;
 
     if (thd->lean_init())
       thd->thd_initialize();
@@ -1109,13 +1113,20 @@ void do_handle_one_connection(THD *thd_arg)
     per_user_session_variables.set_thd(thd);
 
     conn_timeout = thd->variables.net_wait_timeout_seconds;
+    //sql_print_information("conn timeout = %lu", conn_timeout);
     set_conn_timeout_err(thd, timeout_error_msg_buf);
 
     while (thd_is_connection_alive(thd))
     {
       mysql_audit_release(thd);
-      if (do_command(thd))
-  break;
+      if (do_command(thd)) {
+        if (connrate_debug) 
+          sql_print_information("do command of thd completed break");
+        break;
+      } else {
+        if (connrate_debug)
+          sql_print_information("do command of thd completed fallthru");
+      }
 
       /*
         Update the error message with new timeout value if wait_timeout

@@ -3255,7 +3255,9 @@ public:
   my_thread_id thread_id() const
   { return m_thread_id; }
   my_thread_id set_new_thread_id();
+
   void release_thread_id();
+  void release_thread_id_nolocks();
 
 #ifdef TARGET_OS_LINUX
   pid_t      system_thread_id;
@@ -3608,7 +3610,7 @@ public:
    */
   ~THD();
 
-  void release_resources();
+  void release_resources(bool tid_release =true);
   my_bool release_resources_started() const { return m_release_resources_started; }
   bool release_resources_done() const { return m_release_resources_done; }
 

@@ -239,6 +239,8 @@ typedef fp_except fp_except_t;
 # endif
 #endif
 
+static bool connrate_debug = false;
+
 extern "C" my_bool reopen_fstreams(const char *filename,
                                    FILE *outstream, FILE *errstream);
 
@@ -317,6 +319,9 @@ extern "C" sig_handler handle_fatal_signal(int sig);
 #define NUM_SHARDED_SOCKETS 4
 std::vector<ObjectPool<THD> *> object_pools;
 std::vector<std::vector<THD*> > deleted_threads;
+
+bool object_pooling = true;
+bool atomics = true;
 
 /* Constants */
 
@@ -400,7 +405,9 @@ my_bool opt_allow_multiple_engines= 0;
 static my_bool opt_short_log_format= 0;
 static uint kill_blocked_pthreads_flag, wake_pthread;
 static ulong killed_threads;
-std::atomic_ulong max_used_connections;
+std::atomic_ulong max_used_connections1;
+ulong max_used_connections;
+
 static char *mysqld_user, *mysqld_chroot;
 static char *default_character_set_name;
 static char *character_set_filesystem_name;
@@ -1041,8 +1048,38 @@ void add_global_thread(THD *thd)
   DBUG_ASSERT(!have_thread);
 }
 
+static void remove_global_thread_nolocks(THD *thd)
+{
+  if (connrate_debug)
+    sql_print_information("thd being removed %p", thd);
+
+  DBUG_PRINT("info", ("remove_global_thread %p current_linfo %p",
+                      thd, thd->current_linfo));
+  DBUG_ASSERT(thd->release_resources_done());
+  /*
+    Used by binlog_reset_master.  It would be cleaner to use
+    DEBUG_SYNC here, but that's not possible because the THD's debug
+    sync feature has been shut down at this point.
+   */
+  DBUG_EXECUTE_IF("sleep_after_lock_thread_count_before_delete_thd",
+                  sleep(5););
+
+  const size_t num_erased= global_thread_list->erase(thd);
+  if (num_erased == 1)
+    --global_thread_count;
+  // Removing a THD that was never added is an error.
+  DBUG_ASSERT(1 == num_erased);
+
+  if (object_pooling && thd->get_conn_thrd_id() != -1) {
+    deleted_threads[thd->get_conn_thrd_id()].push_back(thd);
+  }
+}
+
 void remove_global_thread(THD *thd)
 {
+  if (connrate_debug)
+    sql_print_information("thd being removed %p", thd);
+
   DBUG_PRINT("info", ("remove_global_thread %p current_linfo %p",
                       thd, thd->current_linfo));
   mysql_mutex_lock(&LOCK_thd_remove);
@@ -1062,7 +1099,7 @@ void remove_global_thread(THD *thd)
   // Removing a THD that was never added is an error.
   DBUG_ASSERT(1 == num_erased);
 
-  if (thd->get_conn_thrd_id() != -1) {
+  if (object_pooling && thd->get_conn_thrd_id() != -1) {
     deleted_threads[thd->get_conn_thrd_id()].push_back(thd);
   }
 
@@ -1477,7 +1514,7 @@ static int init_thread_environment();
 static char *get_relative_path(const char *path);
 static int fix_paths(void);
 void handle_connections_sockets(bool admin, int64_t socketid = -1);
-pthread_handler_t handle_connections_sockets_thread_soreuse(void *arg);
+pthread_handler_t soreusethread(void *arg);
 #ifdef _WIN32
 pthread_handler_t handle_connections_sockets_thread(void *arg);
 #endif
@@ -2776,17 +2813,20 @@ static void network_init(void)
   if (!opt_disable_networking && !opt_bootstrap)
   {
     if (mysqld_port != 0) {
-#if 1
-      if (true) {
+
+      if (socket_sharding) {
         for(int sid = 0; sid < (NUM_SHARDED_SOCKETS - 1); sid++) {
-        //for(int sid = 0; sid < 1; sid++) 
            ip_sharded_sockets[sid] = activate_tcp_port(mysqld_port, true);
         }
       }
-#endif
+
       //ip_sock= activate_tcp_port(mysqld_port, socket_sharding);
-      ip_sock= activate_tcp_port(mysqld_port, true);
-      ip_sharded_sockets[NUM_SHARDED_SOCKETS - 1] = ip_sock;
+      ip_sock= activate_tcp_port(mysqld_port, socket_sharding);
+
+      if (socket_sharding) {
+        ip_sharded_sockets[NUM_SHARDED_SOCKETS - 1] = ip_sock;
+      }
+
       object_pools.reserve(NUM_SHARDED_SOCKETS);
       for (size_t ii = 0; ii < NUM_SHARDED_SOCKETS; ii++) {
           object_pools.push_back(new ObjectPool<THD>(1000));
@@ -2968,13 +3008,21 @@ void thd_release_resources(THD *thd)
 
 void dec_connection_count()
 {
-  --connection_count_atomic;
-  //mysql_mutex_lock(&LOCK_connection_count);
-  //--connection_count;
-  if (connection_count_atomic.load() == 0)
-  //if (connection_count == 0)
-    mysql_cond_signal(&COND_connection_count);
-  //mysql_mutex_unlock(&LOCK_connection_count);
+  if (atomics) {
+    uint val = --connection_count_atomic;
+    if (connrate_debug)
+      sql_print_information("connection count being decremented:  %u", val);
+
+    if (val == 0)
+      mysql_cond_signal(&COND_connection_count);
+  } else {
+
+    mysql_mutex_lock(&LOCK_connection_count);
+    --connection_count;
+    if (connection_count == 0)
+      mysql_cond_signal(&COND_connection_count);
+    mysql_mutex_unlock(&LOCK_connection_count);
+  }
 }
 
 
@@ -2996,12 +3044,14 @@ void destroy_thd(THD *thd)
                  (ie, caller should return, not abort with pthread_exit())
 */
 
-static bool block_until_new_connection()
+static bool block_until_new_connection_assumelock()
 {
-  mysql_mutex_lock(&LOCK_thread_count);
+  //mysql_mutex_lock(&LOCK_thread_count);
   if (blocked_pthread_count < max_blocked_pthreads &&
       !abort_loop && !kill_blocked_pthreads_flag)
   {
+    if (connrate_debug)
+      sql_print_information("blocking thread: tc: %u, blocked: %lu", get_thread_count(), blocked_pthread_count);
     /* Don't kill the pthread, just block it for reuse */
     DBUG_PRINT("info", ("Blocking pthread for reuse"));
     blocked_pthread_count++;
@@ -3051,11 +3101,14 @@ static bool block_until_new_connection()
       thd->mysys_var->abort= 0;
       thd->thr_create_utime= thd->start_utime= my_micro_time();
       add_global_thread(thd);
-      mysql_mutex_unlock(&LOCK_thread_count);
+      //mysql_mutex_unlock(&LOCK_thread_count);
       return true;
     }
+  } else if (blocked_pthread_count >= max_blocked_pthreads) {
+    sql_print_information("losing thread without blocking: tc: %u, blocked: %lu",
+       get_thread_count(), blocked_pthread_count);
   }
-  mysql_mutex_unlock(&LOCK_thread_count);
+  //mysql_mutex_unlock(&LOCK_thread_count);
   return false;
 }
 
@@ -3080,36 +3133,53 @@ bool one_thread_per_connection_end(THD *thd, bool block_pthread)
   DBUG_ENTER("one_thread_per_connection_end");
   DBUG_PRINT("info", ("thd %p block_pthread %d", thd, (int) block_pthread));
 
-  thd->release_resources();
-
-  int32_t conn_thrd_id = thd->get_conn_thrd_id();
-
-  remove_global_thread(thd);
   dec_connection_count();
-  if (kill_blocked_pthreads_flag)
-  {
-    // Do not block if we are about to shut down
-    block_pthread= false;
-  }
 
   // Clean up errors now, before possibly waiting for a new connection.
 #ifndef EMBEDDED_LIBRARY
   ERR_remove_state(0);
 #endif
 
-  if (conn_thrd_id == -1) {
+  if (kill_blocked_pthreads_flag)
+  {
+    // Do not block if we are about to shut down
+    block_pthread= false;
+  }
+
+  int32_t conn_thrd_id = thd->get_conn_thrd_id();
+
+  thd->release_resources(false);
+
+  mysql_mutex_lock(&LOCK_thd_remove);
+  mysql_mutex_lock(&LOCK_thread_count);
+
+  thd->release_thread_id_nolocks();
+
+  // thd has already been recycled into 
+  // deleted threads and destructor has been called.
+  remove_global_thread_nolocks(thd);
+
+  // release this early so that you don't hold while
+  // entering block_until_new_connection_assumelocks
+  mysql_mutex_unlock(&LOCK_thd_remove);
+  mysql_cond_broadcast(&COND_thread_count);
+
+  if (conn_thrd_id == -1 || !object_pooling) {
      delete thd;
   }
 
+  if (block_pthread)
+    block_pthread= block_until_new_connection_assumelock();
+
+  mysql_mutex_unlock(&LOCK_thread_count);
+
+// We will need to look into this later. ANIRBAN
 #ifdef HAVE_PSI_THREAD_INTERFACE
   /*
     Delete the instrumentation for the job that just completed.
   */
   PSI_THREAD_CALL(delete_current_thread)();
 #endif
-
-  if (block_pthread)
-    block_pthread= block_until_new_connection();
 
   if (block_pthread)
     DBUG_RETURN(false);                         // Pthread is reused
@@ -6631,8 +6701,7 @@ static void handle_connections_sockets_all()
   }
   mysql_mutex_unlock(&LOCK_thread_count);
 
-  //if (socket_sharding) 
-  if (true) {
+  if (socket_sharding) {
     pthread_t hThread;
     int error;
 
@@ -6646,7 +6715,7 @@ static void handle_connections_sockets_all()
         handler_count++;
         if ((error= mysql_thread_create(key_thread_handle_con_sockets,
                                       &hThread, &connection_attrib,
-                                      handle_connections_sockets_thread_soreuse, reinterpret_cast<void*>(tid))))
+                                      soreusethread, reinterpret_cast<void*>(tid))))
         {
           sql_print_warning("Can't create thread to handle TCP/IP"
                             " (errno= %d)", error);
@@ -7674,6 +7743,8 @@ void handle_connection_in_main_thread(THD *thd)
   do_handle_one_connection(thd);
 }
 
+static uint how_many_new_thread = 0;
+static uint how_many_wait = 0;
 
 /*
   Scheduler that uses one thread per connection
@@ -7681,6 +7752,9 @@ void handle_connection_in_main_thread(THD *thd)
 
 void create_thread_to_handle_connection(THD *thd)
 {
+  if (connrate_debug)
+    sql_print_information("create_thread_to_handle_connection: %u", get_thread_count());
+
   mysql_mutex_assert_owner(&LOCK_thread_count);
   if (blocked_pthread_count >  wake_pthread)
   {
@@ -7688,10 +7762,28 @@ void create_thread_to_handle_connection(THD *thd)
     DBUG_PRINT("info", ("waiting_thd_list->push %p", thd));
     waiting_thd_list->push_back(thd);
     wake_pthread++;
+    if (connrate_debug)
+      sql_print_information("thread being put in waiting list blocked:%lu wake: %u", blocked_pthread_count, wake_pthread);
+
+    // release thread before signal so as to prevent unnecessary context switch
+    mysql_mutex_unlock(&LOCK_thread_count);
     mysql_cond_signal(&COND_thread_cache);
+
+    how_many_wait++;
+    if (how_many_wait % 5000 == 0) {
+       sql_print_information("new thread being waited because blocked threads available: %lu wake: %u total wait: %u, total new: %u", blocked_pthread_count, wake_pthread, how_many_wait, how_many_new_thread);
+    }
   }
   else
   {
+    if (connrate_debug)
+       sql_print_information("new thread being created because cond not met: blocked: %lu wake: %u", blocked_pthread_count, wake_pthread);
+
+    how_many_new_thread++;
+    if (how_many_new_thread % 5000 == 0) {
+       sql_print_information("new thread being created because cond not met: blocked: %lu wake: %u total wait: %u, total new: %u", blocked_pthread_count, wake_pthread, how_many_wait, how_many_new_thread);
+    }
+
     char error_message_buff[MYSQL_ERRMSG_SIZE];
     /* Create new thread to handle connection */
     int error;
@@ -7713,13 +7805,18 @@ void create_thread_to_handle_connection(THD *thd)
       thd->killed= THD::KILL_CONNECTION;      // Safety
       mysql_mutex_unlock(&LOCK_thread_count);
 
-      --connection_count_atomic;
-      //mysql_mutex_lock(&LOCK_connection_count);
-      //--connection_count;
-      if (connection_count_atomic.load() == 0)
-        mysql_cond_signal(&COND_connection_count);
+      if (atomics) {
+        --connection_count_atomic;
+         if (connection_count_atomic.load() == 0)
+           mysql_cond_signal(&COND_connection_count);
+      } else {
+        mysql_mutex_lock(&LOCK_connection_count);
+        --connection_count;
+        if (connection_count == 0)
+          mysql_cond_signal(&COND_connection_count);
 
-      //mysql_mutex_unlock(&LOCK_connection_count);
+        mysql_mutex_unlock(&LOCK_connection_count);
+      }
 
       statistic_increment(aborted_connects,&LOCK_status);
       statistic_increment(connection_errors_internal, &LOCK_status);
@@ -7733,8 +7830,8 @@ void create_thread_to_handle_connection(THD *thd)
       /* purecov: end */
     }
     add_global_thread(thd);
+    mysql_mutex_unlock(&LOCK_thread_count);
   }
-  mysql_mutex_unlock(&LOCK_thread_count);
   DBUG_PRINT("info",("Thread created"));
 }
 
@@ -7751,7 +7848,9 @@ void create_thread_to_handle_connection(THD *thd)
   @param[in,out] thd    Thread handle of future thread.
 */
 
-static void create_new_thread(THD *thd, int64_t conn_thrd_id = -1)
+std::atomic_uint how_many_threads(0);
+
+static void create_new_thread(THD *thd)
 {
   DBUG_ENTER("create_new_thread");
 
@@ -7760,14 +7859,33 @@ static void create_new_thread(THD *thd, int64_t conn_thrd_id = -1)
     only (max_connections + 1) connections.
   */
 
-  //mysql_mutex_lock(&LOCK_connection_count);
+  uint ccnt = 0;
 
-  uint ccnt = connection_count_atomic.load();
+  if (atomics) {
+    ccnt = connection_count_atomic.load();
+
+  } else {
+    ccnt = connection_count;
+    mysql_mutex_lock(&LOCK_connection_count);
+  }
+
+  if (connrate_debug)
+     sql_print_information("create new thd: %p, connection_count: %u : max:%lu", thd, ccnt, max_connections);
+
+  uint till_now = how_many_threads++;
+  
+  if (till_now % 5000 == 0) {
+     sql_print_information("create thds: %u, connection_count: %u : max:%lu", till_now, ccnt, max_connections);
+  }
+
   if (((ccnt >= max_connections + 1) &&
        (!thd->is_admin_connection())) || abort_loop)
   {
-    //mysql_mutex_unlock(&LOCK_connection_count);
+    if (!atomics) {
+       mysql_mutex_unlock(&LOCK_connection_count);
+    }
 
+    sql_print_information("too many connections");
     DBUG_PRINT("error",("Too many connections"));
     /*
       The server just accepted the socket connection from the network,
@@ -7782,8 +7900,8 @@ static void create_new_thread(THD *thd, int64_t conn_thrd_id = -1)
       A client expecting a SQLSTATE will not find any, and assume 'HY000'.
     */
     close_connection(thd, ER_CON_COUNT_ERROR);
-    if (conn_thrd_id != -1) {
-      deleted_threads[conn_thrd_id].push_back(thd);
+    if (object_pooling && thd->get_conn_thrd_id() != -1) {
+      object_pools[thd->get_conn_thrd_id()]->Delete(thd);
       //delete thd;
     } else {
       delete thd;
@@ -7793,23 +7911,31 @@ static void create_new_thread(THD *thd, int64_t conn_thrd_id = -1)
     DBUG_VOID_RETURN;
   }
 
-  ++connection_count_atomic;
+  if (atomics) {
+    ++connection_count_atomic;
+    if (ccnt + 1 > max_used_connections1.load())
+      max_used_connections1.store(ccnt + 1);
 
-  if (ccnt + 1 > max_used_connections.load())
-    max_used_connections.store(ccnt + 1);
+  } else {
+    ++connection_count;
+    if (ccnt + 1 > max_used_connections)
+      max_used_connections = ccnt + 1;
 
-  //mysql_mutex_unlock(&LOCK_connection_count);
+    mysql_mutex_unlock(&LOCK_connection_count);
+  }
+
 
   /* Start a new thread to handle connection. */
 
   mysql_mutex_lock(&LOCK_thread_count);
 
-  if (conn_thrd_id != -1 && deleted_threads[conn_thrd_id].size() >= 100) {
+  if (object_pooling && thd->get_conn_thrd_id() != -1 && deleted_threads[thd->get_conn_thrd_id()].size() >= 100) {
 
-      size_t sz = deleted_threads[conn_thrd_id].size();
+      int32_t pool_id = thd->get_conn_thrd_id();
+      size_t sz = deleted_threads[pool_id].size();
       for (size_t ii = 0; ii < sz; ii++)
-          object_pools[conn_thrd_id]->Delete(deleted_threads[conn_thrd_id][ii]);
-      deleted_threads[conn_thrd_id].clear();
+          object_pools[pool_id]->Delete(deleted_threads[pool_id][ii]);
+      deleted_threads[pool_id].clear();
   }
 
   /*
@@ -7889,7 +8015,6 @@ void handle_connections_sockets(bool admin, int64_t socket_index)
 
   MYSQL_SOCKET cur_ip_sock = (socket_index == -1) ? ip_sock : ip_sharded_sockets[socket_index];
   (void)ip_sharded_sockets;
-  //MYSQL_SOCKET cur_ip_sock = ip_sock;
 
   if (admin)
   {
@@ -8096,10 +8221,13 @@ void handle_connections_sockets(bool admin, int64_t socket_index)
     //std::cerr << "creating THD with lean state = " << lean << std::endl;
     ////std::cout << "creating THD with lean state = " << lean << std::endl;
     thd = nullptr;
-    if (socket_index != -1) {
-      THD *thd1 = object_pools[socket_index]->GetNextWithoutInitializing();
+
+    if (!admin && object_pooling) {
+
+      int64_t pool_index = (socket_index != -1) ? socket_index : 0;
+      THD *thd1 = object_pools[pool_index]->GetNextWithoutInitializing();
       thd = new (thd1) THD(en_plugins, lean);
-      thd->set_conn_thrd_id((int32_t)socket_index);
+      thd->set_conn_thrd_id((int32_t)pool_index);
     } else {
       thd = new THD(en_plugins, lean);
     }
@@ -8132,10 +8260,10 @@ void handle_connections_sockets(bool admin, int64_t socket_index)
         (void) mysql_socket_shutdown(new_sock, SHUT_RDWR);
         (void) mysql_socket_close(new_sock);
       }
-      if (socket_index == -1) {
-         delete thd;
+      if (!admin && object_pooling) {
+         object_pools[thd->get_conn_thrd_id()]->Delete(thd);
       } else {
-         object_pools[socket_index]->Delete(thd);
+         delete thd;
       }
       statistic_increment(connection_errors_internal, &LOCK_status);
       continue;
@@ -8147,12 +8275,12 @@ void handle_connections_sockets(bool admin, int64_t socket_index)
     if (admin)
       thd->set_admin_connection();
 
-    create_new_thread(thd, socket_index);
+    create_new_thread(thd);
   }
   DBUG_VOID_RETURN;
 }
 
-pthread_handler_t handle_connections_sockets_thread_soreuse(void *arg)
+pthread_handler_t soreusethread(void *arg)
 {
   int64_t sid = reinterpret_cast<int64_t>(arg);
   my_thread_init();
@@ -11472,7 +11600,10 @@ void refresh_status(THD *thd)
     not exact anyway.
   */
   mysql_mutex_lock(&LOCK_thread_count);
-  max_used_connections.store(get_thread_count() - delayed_insert_threads);
+
+  max_used_connections1.store(get_thread_count() - delayed_insert_threads);
+  max_used_connections = get_thread_count() - delayed_insert_threads;
+
   mysql_mutex_unlock(&LOCK_thread_count);
 }
 

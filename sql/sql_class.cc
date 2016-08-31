@@ -1650,6 +1650,17 @@ my_thread_id THD::set_new_thread_id()
   return m_thread_id;
 }
 
+void THD::release_thread_id_nolocks() {
+
+  // Some temporary THDs are never given a proper ID.
+  if (m_thread_id != reserved_thread_id) {
+    const size_t num_erased __attribute__((unused)) =
+      global_thread_id_list->erase(m_thread_id);
+    // Assert if the ID was not found in the list.
+    DBUG_ASSERT(num_erased == 1);
+  }
+}
+
 void THD::release_thread_id() {
   // Some temporary THDs are never given a proper ID.
   if (m_thread_id != reserved_thread_id) {
@@ -1743,12 +1754,14 @@ void THD::cleanup(void)
 /**
   Release most resources, prior to THD destruction.
  */
-void THD::release_resources()
+void THD::release_resources(bool tid_release)
 {
-  mysql_mutex_assert_not_owner(&LOCK_thread_count);
   DBUG_ASSERT(m_release_resources_done == false);
 
-  release_thread_id();
+  if (tid_release) {
+    mysql_mutex_assert_not_owner(&LOCK_thread_count);
+    release_thread_id();
+  }
 
   mysql_mutex_lock(&LOCK_status);
   add_to_status(&global_status_var, &status_var);
