@@ -71,6 +71,8 @@
 using std::min;
 using std::max;
 
+extern std::atomic<my_thread_id> thread_id_counter;
+
 /*
   The following is used to initialise Table_ident with a internal
   table name
@@ -1630,8 +1632,8 @@ void THD::change_user(void)
 
 my_thread_id THD::set_new_thread_id()
 {
-  my_thread_id new_id;
-  mysql_mutex_assert_owner(&LOCK_thread_count);
+  //my_thread_id new_id;
+  //mysql_mutex_assert_owner(&LOCK_thread_count);
 
   DBUG_EXECUTE_IF("skip_to_largest_thread_id", {
       thread_id_counter= std::numeric_limits<uint32_t>::max();
@@ -1641,10 +1643,11 @@ my_thread_id THD::set_new_thread_id()
       thread_id_counter= std::numeric_limits<uint32_t>::max() - 1;
     }
   );
-  do {
-    new_id= thread_id_counter++;
-  } while (!global_thread_id_list->insert(new_id).second);
-  m_thread_id= new_id;
+  //do {
+  //new_id= ++thread_id_counter;
+
+  //} while (!global_thread_id_list->insert(new_id).second);
+  m_thread_id = ++thread_id_counter;
   total_thread_ids++;
 
   return m_thread_id;
@@ -1652,6 +1655,7 @@ my_thread_id THD::set_new_thread_id()
 
 void THD::release_thread_id_nolocks() {
 
+  // this function is never called anymore.
   // Some temporary THDs are never given a proper ID.
   if (m_thread_id != reserved_thread_id) {
     const size_t num_erased __attribute__((unused)) =

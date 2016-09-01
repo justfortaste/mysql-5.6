@@ -351,8 +351,13 @@ vio_is_blocking(Vio * vio)
   DBUG_RETURN(vio->is_blocking_flag);
 }
 
+static my_bool no_fastsend = TRUE;
+
 int vio_fastsend(Vio * vio __attribute__((unused)))
 {
+  if (no_fastsend)
+    return 0;
+
   int r=0;
   DBUG_ENTER("vio_fastsend");
 
