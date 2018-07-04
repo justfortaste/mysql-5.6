@@ -504,7 +504,7 @@ INCLUDE_DIRECTORIES(${CMAKE_CURRENT_BINARY_DIR}/include)
 # Add bundled or system zlib.
 MYSQL_CHECK_ZLIB_WITH_COMPRESS()
 # Add zstd.
-MYSQL_CHECK_ZSTD()
+#MYSQL_CHECK_ZSTD()
 # Add bundled yassl/taocrypt or system openssl.
 MYSQL_CHECK_SSL()
 # Find system readline.
